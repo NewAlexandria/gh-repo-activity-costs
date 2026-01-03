@@ -23,19 +23,56 @@ This tool leverages the GitHub CLI (`gh`) to fetch data via GraphQL, ensuring ef
    - [Install GitHub CLI](https://cli.github.com/)
    - Authenticate with: `gh auth login`
 
+## Installation
+
+### GitHub CLI Extension (Recommended)
+You can find and install this tool as a `gh` extension:
+
+```bash
+# Find the extension
+gh extension search metrics
+
+# Install it
+gh extension install NewAlexandria/gh-repo-activity-costs
+
+# Or install from a specific release
+gh extension install NewAlexandria/gh-repo-activity-costs@v1.2.0
+
+# List installed extensions
+gh extension list
+
+# Upgrade all extensions
+gh extension upgrade --all
+```
+
+### Local Development
+To run or develop the script locally:
+
+```bash
+# Clone the repository
+git clone https://github.com/NewAlexandria/gh-repo-activity-costs.git
+cd gh-repo-activity-costs
+
+# Make it executable
+chmod +x gh-repo-activity-costs
+
+# Run locally
+./gh-repo-activity-costs --help
+```
+
 ## Quick Start
 
 ### 1. Fetch Data
 Fetch the last 100 PRs from a repository:
 ```bash
-python3 pr_metrics_analyzer.py --repo owner/repo --limit 100
+./gh-repo-activity-costs --repo owner/repo --limit 100
 ```
 This generates `pr_metrics_report.json`.
 
 ### 2. Analyze Report
 Generate a summary from the report:
 ```bash
-python3 pr_metrics_analyzer.py --analyze pr_metrics_report.json --stream
+./gh-repo-activity-costs --analyze pr_metrics_report.json --stream
 ```
 
 ## Detailed Usage
