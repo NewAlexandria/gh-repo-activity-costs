@@ -67,11 +67,13 @@ When analyzing a report using `--analyze`, the script generates:
 ### Custom Histogram Bins
 
 You can customize the runtime distribution bins using the `--runtime-bins` flag. Pass a comma-separated list of cutoffs.
+
 Default bins are `2,5,10,20,30,35,40,45,50`.
+Which means `[0,2], [2,5], [5,10], [10,20], [20,30], [30,35], [35,40], [40,45], [45,50], [50,inf]`.
 
 ```bash
 # Example: Create bins for 0-10, 10-30, 30-60, 60+
-./gh-repo-activity-costs --repo owner/repo --runtime-bins "10,30,60" --stream
+gh repo-activity-costs --repo owner/repo --runtime-bins "10,30,60" --stream
 ```
 
 ## Workflows

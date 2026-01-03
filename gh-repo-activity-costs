@@ -212,27 +212,40 @@ def get_prs_and_metrics(owner: str, repo: str, limit: int = 50, start_date: Opti
     return all_prs
 
 
-def generate_summary(report_data: Dict[str, Any], prediction_reduction: Optional[float] = None, prediction_cost: Optional[float] = None) -> Dict[str, Any]:
-    """Generate statistics summary from report data, optionally including cost projections."""
+def generate_summary(report_data: Dict[str, Any], prediction_reduction: Optional[float] = None, prediction_cost: Optional[float] = None, runtime_bins_cutoffs: Optional[List[float]] = None) -> Dict[str, Any]:
+    """Generate statistics summary from report data, optionally including cost projections and custom bins."""
     prs = report_data.get("pull_requests", [])
     total_prs = len(prs)
     total_runtime_minutes = 0.0
     workflow_stats = {}
 
+    # Define cutoffs
+    if runtime_bins_cutoffs:
+        cutoffs = sorted(runtime_bins_cutoffs)
+    else:
+        cutoffs = [2, 5, 10, 20, 30, 35, 40, 45, 50]
+
+    # Generate bin keys dynamically
+    bin_keys = []
+    prev = 0
+    for c in cutoffs:
+        # Format as integer if it's an integer, otherwise float
+        p_str = f"{int(prev)}" if prev == int(prev) else f"{prev}"
+        c_str = f"{int(c)}" if c == int(c) else f"{c}"
+        bin_keys.append(f"{p_str}-{c_str}")
+        prev = c
+
+    last_c = cutoffs[-1]
+    last_c_str = f"{int(last_c)}" if last_c == int(last_c) else f"{last_c}"
+    bin_keys.append(f"{last_c_str}+")
+
     # Histogram bins helper
     def get_bin(r):
-        if r < 2: return "0-2"
-        if r < 5: return "2-5"
-        if r < 10: return "5-10"
-        if r < 20: return "10-20"
-        if r < 30: return "20-30"
-        if r < 35: return "30-35"
-        if r < 40: return "35-40"
-        if r < 45: return "40-45"
-        if r < 50: return "45-50"
-        return "50+"
+        for i, cutoff in enumerate(cutoffs):
+             if r < cutoff:
+                 return bin_keys[i]
+        return bin_keys[-1]
 
-    bin_keys = ["0-2", "2-5", "5-10", "10-20", "20-30", "30-35", "35-40", "40-45", "45-50", "50+"]
     histogram = {k: 0 for k in bin_keys}
 
     # Advanced stats containers
@@ -346,6 +359,24 @@ def generate_summary(report_data: Dict[str, Any], prediction_reduction: Optional
 
     return summary
 
+def get_safety_file_path(repo_name: str) -> str:
+    """Determine the safety file path based on available temp directories."""
+    candidates = [
+        os.path.join(".", "tmp"),
+        "/tmp",
+        os.path.expanduser("~/.tmp"),
+        "."
+    ]
+
+    selected_dir = "." # Default fallback
+
+    for candidate in candidates:
+        if os.path.exists(candidate) and os.path.isdir(candidate) and os.access(candidate, os.W_OK):
+            selected_dir = candidate
+            break
+
+    return os.path.join(selected_dir, f"safety_{repo_name}.json")
+
 def main():
     parser = argparse.ArgumentParser(description="Generate PR Metrics Report including Action Runtime\n\nFor detailed examples, see https://github.com/NewAlexandria/gh-repo-activity-costs", formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--repo", help="Repository in format owner/repo")
@@ -363,6 +394,10 @@ def main():
     # Prediction arguments
     parser.add_argument("--prediction-reduction", type=float, help="Target reduction in minutes per PR for cost projection")
     parser.add_argument("--prediction-cost", type=float, help="Billing cost per minute (e.g., 0.008) for cost projection")
+
+    # Custom bins argument
+    default_bins_str = "2,5,10,20,30,35,40,45,50"
+    parser.add_argument("--runtime-bins", default=default_bins_str, help=f"Comma-separated list of runtime cutoffs for histogram bins (default: {default_bins_str})")
 
     args = parser.parse_args()
 
@@ -391,24 +426,24 @@ def main():
 
         if args.start_date:
             try:
-                 from datetime import timezone
-                 dt = datetime.strptime(args.start_date, "%Y-%m-%d")
-                 start_date = dt.replace(tzinfo=timezone.utc)
+                from datetime import timezone
+                dt = datetime.strptime(args.start_date, "%Y-%m-%d")
+                start_date = dt.replace(tzinfo=timezone.utc)
             except ValueError:
-                 print("Error: Invalid start date format. Use YYYY-MM-DD", file=sys.stderr)
-                 sys.exit(1)
+                print("Error: Invalid start date format. Use YYYY-MM-DD", file=sys.stderr)
+                sys.exit(1)
 
         if args.end_date:
             try:
-                 from datetime import timezone
-                 dt = datetime.strptime(args.end_date, "%Y-%m-%d")
-                 end_date = dt.replace(tzinfo=timezone.utc)
+                from datetime import timezone
+                dt = datetime.strptime(args.end_date, "%Y-%m-%d")
+                end_date = dt.replace(tzinfo=timezone.utc)
             except ValueError:
-                 print("Error: Invalid end date format. Use YYYY-MM-DD", file=sys.stderr)
-                 sys.exit(1)
+                print("Error: Invalid end date format. Use YYYY-MM-DD", file=sys.stderr)
+                sys.exit(1)
 
         # Safety file path
-        safety_file = f"safety_{repo_name}.json"
+        safety_file = get_safety_file_path(repo_name)
 
         try:
             metrics = get_prs_and_metrics(owner, repo_name, args.limit, start_date, end_date, args.cursor, safety_file)
@@ -424,6 +459,14 @@ def main():
                 json.dump(report_data, f, indent=2)
 
             print(f"Report generated at {args.output}", file=sys.stderr)
+
+            # Cleanup safety file on success
+            if os.path.exists(safety_file):
+                try:
+                    os.remove(safety_file)
+                    # print(f"Safety file {safety_file} removed.", file=sys.stderr)
+                except OSError as e:
+                    print(f"Warning: Could not remove safety file {safety_file}: {e}", file=sys.stderr)
         except Exception:
             sys.exit(1)
 
@@ -434,7 +477,14 @@ def main():
 
     # Generate summary if requested via output args
     if (args.summary_output or args.stream) and report_data:
-        summary = generate_summary(report_data, args.prediction_reduction, args.prediction_cost)
+        # Parse bins
+        try:
+            runtime_bins_cutoffs = [float(x.strip()) for x in args.runtime_bins.split(",")]
+        except ValueError:
+            print(f"Error: Invalid format for --runtime-bins. Expected comma-separated numbers", file=sys.stderr)
+            sys.exit(1)
+
+        summary = generate_summary(report_data, args.prediction_reduction, args.prediction_cost, runtime_bins_cutoffs)
 
         if args.summary_output:
             with open(args.summary_output, "w") as f:
