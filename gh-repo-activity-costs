@@ -347,7 +347,7 @@ def generate_summary(report_data: Dict[str, Any], prediction_reduction: Optional
     return summary
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate PR Metrics Report including Action Runtime")
+    parser = argparse.ArgumentParser(description="Generate PR Metrics Report including Action Runtime\n\nFor detailed examples, see https://github.com/NewAlexandria/gh-repo-activity-costs", formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--repo", help="Repository in format owner/repo")
     parser.add_argument("--limit", type=int, default=100, help="Max number of PRs to fetch")
     parser.add_argument("--output", default="pr_metrics_report.json", help="Output JSON file path for full report")
