@@ -1,35 +1,448 @@
-#!/usr/bin/env bash
-set -e
+#!/usr/bin/env python3
+import argparse
+import json
+import subprocess
+import sys
+import time
+import re
+import os
+import statistics
+from collections import defaultdict
+from datetime import datetime
+from typing import Dict, List, Any, Optional
 
-echo "Hello gh-repo-activity-costs!"
+def run_gh_query(query: str, variables: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Run a GraphQL query using the gh CLI with rate limit handling."""
+    cmd = ["gh", "api", "graphql", "-f", f"query={query}"]
 
-# Snippets to help get started:
+    if variables:
+        for key, value in variables.items():
+            if value is None:
+                continue
+            if isinstance(value, int):
+                cmd.extend(["-F", f"{key}={value}"])
+            else:
+                cmd.extend(["-f", f"{key}={value}"])
 
-# Determine if an executable is in the PATH
-# if ! type -p ruby >/dev/null; then
-#   echo "Ruby not found on the system" >&2
-#   exit 1
-# fi
+    max_retries = 5
+    retry_count = 0
 
-# Pass arguments through to another command
-# gh issue list "$@" -R cli/cli
+    while retry_count < max_retries:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return json.loads(result.stdout)
+        except subprocess.CalledProcessError as e:
+            err_msg = e.stderr.lower()
+            if "rate limit" in err_msg or "403" in err_msg:
+                wait_time = 60 * (2 ** retry_count)
+                print(f"\n[!] Rate limit hit. Waiting {wait_time} seconds before retrying... (Attempt {retry_count+1}/{max_retries})", file=sys.stderr)
+                time.sleep(wait_time)
+                retry_count += 1
+                continue
+            else:
+                print(f"Error running gh command: {e.stderr}", file=sys.stderr)
+                raise e
 
-# Using the gh api command to retrieve and format information
-# QUERY='
-#   query($endCursor: String) {
-#     viewer {
-#       repositories(first: 100, after: $endCursor) {
-#         nodes {
-#           nameWithOwner
-#           stargazerCount
-#         }
-#       }
-#     }
-#   }
-# '
-# TEMPLATE='
-#   {{- range $repo := .data.viewer.repositories.nodes -}}
-#     {{- printf "name: %s - stargazers: %v\n" $repo.nameWithOwner $repo.stargazerCount -}}
-#   {{- end -}}
-# '
-# exec gh api graphql -f query="${QUERY}" --paginate --template="${TEMPLATE}"
+    raise Exception("Max retries exceeded for rate limit.")
+
+def parse_time(iso_str: str) -> datetime:
+    """Parse ISO8601 string to datetime."""
+    # Handle Z suffix
+    if iso_str.endswith('Z'):
+        iso_str = iso_str[:-1] + '+00:00'
+    return datetime.fromisoformat(iso_str)
+
+def save_partial_report(data: List[Dict[str, Any]], filepath: str, repo: str, cursor: Optional[str] = None):
+    """Save partial report to safety file."""
+    report = {
+        "repository": repo,
+        "generated_at": datetime.now().isoformat(),
+        "pull_requests_count": len(data),
+        "last_cursor": cursor,
+        "pull_requests": data
+    }
+    with open(filepath, "w") as f:
+        json.dump(report, f, indent=2)
+    print(f"[Safe Save] {len(data)} records saved to {filepath}", file=sys.stderr)
+
+def get_prs_and_metrics(owner: str, repo: str, limit: int = 50, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None, initial_cursor: Optional[str] = None, safety_file: str = "safety_save.json") -> List[Dict[str, Any]]:
+    """Fetch PRs and their associated workflow run metrics using pagination."""
+
+    query = """
+    query($owner: String!, $name: String!, $limit: Int!, $cursor: String) {
+      repository(owner: $owner, name: $name) {
+        pullRequests(first: $limit, after: $cursor, states: [MERGED, OPEN, CLOSED], orderBy: {field: CREATED_AT, direction: DESC}) {
+          pageInfo {
+            endCursor
+            hasNextPage
+          }
+          nodes {
+            number
+            title
+            author {
+              login
+            }
+            state
+            createdAt
+            mergedAt
+            commits(last: 1) {
+              nodes {
+                commit {
+                  checkSuites(first: 10) {
+                    nodes {
+                      app {
+                        name
+                      }
+                      workflowRun {
+                        workflow {
+                          name
+                        }
+                        runNumber
+                        createdAt
+                        updatedAt
+                      }
+                      checkRuns(first: 20) {
+                        nodes {
+                          name
+                          startedAt
+                          completedAt
+                          conclusion
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    all_prs = []
+    cursor = initial_cursor
+    has_next_page = True
+    batch_size = 50
+
+    print(f"Fetching PRs for {owner}/{repo}...", file=sys.stderr)
+
+    try:
+        while has_next_page and len(all_prs) < limit:
+            current_limit = min(batch_size, limit - len(all_prs))
+
+            variables = {
+                "owner": owner,
+                "name": repo,
+                "limit": current_limit,
+                "cursor": cursor
+            }
+
+            data = run_gh_query(query, variables)
+
+            if not data.get("data", {}).get("repository", {}):
+                print(f"No data found or error for {owner}/{repo}.", file=sys.stderr)
+                break
+
+            pr_data_node = data["data"]["repository"]["pullRequests"]
+            new_nodes = pr_data_node["nodes"]
+            page_info = pr_data_node["pageInfo"]
+
+            has_next_page = page_info["hasNextPage"]
+            cursor = page_info["endCursor"]
+
+            for pr_node in new_nodes:
+                created_at = parse_time(pr_node["createdAt"])
+
+                if start_date and created_at < start_date:
+                    has_next_page = False
+                    break
+
+                if end_date and created_at > end_date:
+                    continue
+
+                pr_metric = {
+                    "number": pr_node["number"],
+                    "title": pr_node["title"],
+                    "author": pr_node["author"]["login"] if pr_node["author"] else "unknown",
+                    "state": pr_node["state"],
+                    "created_at": pr_node["createdAt"],
+                    "merged_at": pr_node["mergedAt"],
+                    "workflow_runs": [],
+                    "total_runtime_minutes": 0.0
+                }
+
+                commits = pr_node.get("commits", {}).get("nodes", [])
+                if commits:
+                    check_suites = commits[0]["commit"].get("checkSuites", {}).get("nodes", [])
+                    for suite in check_suites:
+                        wf_run = suite.get("workflowRun")
+                        if wf_run:
+                            check_runs = suite.get("checkRuns", {}).get("nodes", [])
+                            for run in check_runs:
+                                if run["startedAt"] and run["completedAt"]:
+                                    s = parse_time(run["startedAt"])
+                                    e = parse_time(run["completedAt"])
+                                    duration_mins = (e - s).total_seconds() / 60.0
+
+                                    pr_metric["workflow_runs"].append({
+                                        "name": run["name"],
+                                        "status": run["conclusion"],
+                                        "started_at": run["startedAt"],
+                                        "completed_at": run["completedAt"],
+                                        "minutes": duration_mins
+                                    })
+                                    pr_metric["total_runtime_minutes"] += duration_mins
+
+                all_prs.append(pr_metric)
+                if len(all_prs) >= limit:
+                    break
+
+            print(f"Fetched {len(all_prs)} PRs so far...", file=sys.stderr)
+            save_partial_report(all_prs, safety_file, f"{owner}/{repo}", cursor)
+
+    except (KeyboardInterrupt, Exception) as e:
+        print(f"\n[!] Script interrupted or crashed: {e}", file=sys.stderr)
+        if len(all_prs) > 0:
+            print(f"[!] Safety file saved at: {os.path.abspath(safety_file)}", file=sys.stderr)
+            print(f"[!] To resume, run the command with:", file=sys.stderr)
+            print(f"    --cursor \"{cursor}\"", file=sys.stderr)
+        raise e
+
+    return all_prs
+
+
+def generate_summary(report_data: Dict[str, Any], prediction_reduction: Optional[float] = None, prediction_cost: Optional[float] = None) -> Dict[str, Any]:
+    """Generate statistics summary from report data, optionally including cost projections."""
+    prs = report_data.get("pull_requests", [])
+    total_prs = len(prs)
+    total_runtime_minutes = 0.0
+    workflow_stats = {}
+
+    # Histogram bins helper
+    def get_bin(r):
+        if r < 2: return "0-2"
+        if r < 5: return "2-5"
+        if r < 10: return "5-10"
+        if r < 20: return "10-20"
+        if r < 30: return "20-30"
+        if r < 35: return "30-35"
+        if r < 40: return "35-40"
+        if r < 45: return "40-45"
+        if r < 50: return "45-50"
+        return "50+"
+
+    bin_keys = ["0-2", "2-5", "5-10", "10-20", "20-30", "30-35", "35-40", "40-45", "45-50", "50+"]
+    histogram = {k: 0 for k in bin_keys}
+
+    # Advanced stats containers
+    all_runtimes = []
+    # Monthly stats include count, total_runtime, runtimes list, and a histogram for that month
+    monthly_stats = defaultdict(lambda: {
+        "count": 0,
+        "total_runtime": 0.0,
+        "runtimes": [],
+        "histogram": {k: 0 for k in bin_keys}
+    })
+
+    for pr in prs:
+        runtime = pr.get("total_runtime_minutes", 0.0)
+        total_runtime_minutes += runtime
+        all_runtimes.append(runtime)
+
+        # Monthly aggregation
+        created_at_dt = parse_time(pr.get("created_at"))
+        month_key = created_at_dt.strftime("%Y-%m")
+        monthly_stats[month_key]["count"] += 1
+        monthly_stats[month_key]["total_runtime"] += runtime
+        monthly_stats[month_key]["runtimes"].append(runtime)
+
+        # Determine bin
+        bin_name = get_bin(runtime)
+
+        # Global histogram
+        histogram[bin_name] += 1
+
+        # Monthly histogram
+        monthly_stats[month_key]["histogram"][bin_name] += 1
+
+        for run in pr.get("workflow_runs", []):
+            wf_name = run.get("name", "unknown")
+            minutes = run.get("minutes", 0.0)
+
+            if wf_name not in workflow_stats:
+                workflow_stats[wf_name] = {"count": 0, "total_minutes": 0.0}
+
+            workflow_stats[wf_name]["count"] += 1
+            workflow_stats[wf_name]["total_minutes"] += minutes
+
+    avg_runtime_per_pr = total_runtime_minutes / total_prs if total_prs > 0 else 0.0
+    median_runtime_per_pr = statistics.median(all_runtimes) if all_runtimes else 0.0
+
+    # Cost Projection Logic
+    cost_projection = None
+    monthly_projections = {}
+
+    if prediction_reduction is not None and prediction_cost is not None:
+        total_savings_minutes = total_prs * prediction_reduction
+        total_savings_cost = total_savings_minutes * prediction_cost
+
+        current_total_cost = total_runtime_minutes * prediction_cost
+        projected_total_cost = current_total_cost - total_savings_cost
+
+        cost_projection = {
+            "target_reduction_per_pr_minutes": prediction_reduction,
+            "billing_cost_per_minute": prediction_cost,
+            "total_projected_savings_minutes": round(total_savings_minutes, 2),
+            "total_projected_savings_cost": round(total_savings_cost, 2),
+            "total_cost_before": round(current_total_cost, 2),
+            "total_cost_after": round(projected_total_cost, 2),
+            "monthly_projections": monthly_projections
+        }
+
+    # Format monthly stats
+    monthly_summary = {}
+    for month, stats in sorted(monthly_stats.items()):
+        count = stats["count"]
+        total = stats["total_runtime"]
+        monthly_summary[month] = {
+            "count": count,
+            "total_runtime_minutes": round(total, 2),
+            "average_runtime_minutes": round(total / count, 2) if count > 0 else 0,
+            "median_runtime_minutes": round(statistics.median(stats["runtimes"]), 2) if stats["runtimes"] else 0,
+            "histogram": stats["histogram"]
+        }
+
+        # Monthly cost projection
+        if cost_projection:
+             monthly_saving_mins = count * prediction_reduction
+             monthly_saving_cost = monthly_saving_mins * prediction_cost
+             monthly_projections[month] = {
+                 "savings_minutes": round(monthly_saving_mins, 2),
+                 "savings_cost": round(monthly_saving_cost, 2)
+             }
+
+    summary = {
+        "repository": report_data.get("repository"),
+        "generated_at": datetime.now().isoformat(),
+        "total_prs_analyzed": total_prs,
+        "total_action_runtime_minutes": round(total_runtime_minutes, 2),
+        "average_runtime_per_pr_minutes": round(avg_runtime_per_pr, 2),
+        "median_runtime_per_pr_minutes": round(median_runtime_per_pr, 2),
+        "runtime_histogram": histogram,
+        "monthly_breakdown": monthly_summary,
+        "workflow_breakdown": {
+            k: {
+                "count": v["count"],
+                "total_minutes": round(v["total_minutes"], 2),
+                "avg_minutes": round(v["total_minutes"] / v["count"], 2) if v["count"] > 0 else 0
+            }
+            for k, v in workflow_stats.items()
+        }
+    }
+
+    if cost_projection:
+        summary["cost_projection"] = cost_projection
+
+    return summary
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate PR Metrics Report including Action Runtime")
+    parser.add_argument("--repo", help="Repository in format owner/repo")
+    parser.add_argument("--limit", type=int, default=100, help="Max number of PRs to fetch")
+    parser.add_argument("--output", default="pr_metrics_report.json", help="Output JSON file path for full report")
+    parser.add_argument("--start-date", help="Filter PRs created after this date (YYYY-MM-DD)")
+    parser.add_argument("--end-date", help="Filter PRs created before this date (YYYY-MM-DD)")
+    parser.add_argument("--cursor", help="Resume fetching from this cursor")
+
+    # Summarization arguments
+    parser.add_argument("--analyze", help="Path to existing JSON report to analyze (skips fetching)")
+    parser.add_argument("--summary-output", help="Output JSON file path for summary stats")
+    parser.add_argument("--stream", action="store_true", help="Print summary JSON to stdout")
+
+    # Prediction arguments
+    parser.add_argument("--prediction-reduction", type=float, help="Target reduction in minutes per PR for cost projection")
+    parser.add_argument("--prediction-cost", type=float, help="Billing cost per minute (e.g., 0.008) for cost projection")
+
+    args = parser.parse_args()
+
+    report_data = None
+
+    # Analysis mode
+    if args.analyze:
+        try:
+            with open(args.analyze, 'r') as f:
+                report_data = json.load(f)
+            print(f"Loaded report from {args.analyze}", file=sys.stderr)
+        except Exception as e:
+            print(f"Error loading report: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # Fetch mode
+    elif args.repo:
+        try:
+            owner, repo_name = args.repo.split("/")
+        except ValueError:
+            print("Error: Repo must be in format owner/repo", file=sys.stderr)
+            sys.exit(1)
+
+        start_date = None
+        end_date = None
+
+        if args.start_date:
+            try:
+                 from datetime import timezone
+                 dt = datetime.strptime(args.start_date, "%Y-%m-%d")
+                 start_date = dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                 print("Error: Invalid start date format. Use YYYY-MM-DD", file=sys.stderr)
+                 sys.exit(1)
+
+        if args.end_date:
+            try:
+                 from datetime import timezone
+                 dt = datetime.strptime(args.end_date, "%Y-%m-%d")
+                 end_date = dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                 print("Error: Invalid end date format. Use YYYY-MM-DD", file=sys.stderr)
+                 sys.exit(1)
+
+        # Safety file path
+        safety_file = f"safety_{repo_name}.json"
+
+        try:
+            metrics = get_prs_and_metrics(owner, repo_name, args.limit, start_date, end_date, args.cursor, safety_file)
+
+            report_data = {
+                "repository": args.repo,
+                "generated_at": datetime.now().isoformat(),
+                "pull_requests_count": len(metrics),
+                "pull_requests": metrics
+            }
+
+            with open(args.output, "w") as f:
+                json.dump(report_data, f, indent=2)
+
+            print(f"Report generated at {args.output}", file=sys.stderr)
+        except Exception:
+            sys.exit(1)
+
+    else:
+        print("Error: Either --repo or --analyze must be specified", file=sys.stderr)
+        parser.print_help()
+        sys.exit(1)
+
+    # Generate summary if requested via output args
+    if (args.summary_output or args.stream) and report_data:
+        summary = generate_summary(report_data, args.prediction_reduction, args.prediction_cost)
+
+        if args.summary_output:
+            with open(args.summary_output, "w") as f:
+                json.dump(summary, f, indent=2)
+            print(f"Summary generated at {args.summary_output}", file=sys.stderr)
+
+        if args.stream:
+            print(json.dumps(summary, indent=2))
+
+if __name__ == "__main__":
+    main()
