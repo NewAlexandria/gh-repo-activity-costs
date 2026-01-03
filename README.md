@@ -1,4 +1,4 @@
-# PR Metrics Analyzer
+# gh repo-activity-costs
 
 A robust Python script to collect and analyze GitHub Pull Request metrics, specifically focusing on **Continuous Integration (CI) Action Runtimes**.
 
@@ -18,7 +18,7 @@ This tool leverages the GitHub CLI (`gh`) to fetch data via GraphQL, ensuring ef
 
 ## Prerequisites
 
-1. **Python 3**: Ensure Python 3.6+ is installed.
+1. **Python 3**: Ensure Python 3.6+ is installed.  Script uses it for scraping resilience.
 2. **GitHub CLI (`gh`)**: The script uses `gh` to communicate with the GitHub API.
    - [Install GitHub CLI](https://cli.github.com/)
    - Authenticate with: `gh auth login`
@@ -46,33 +46,31 @@ gh extension upgrade --all
 ```
 
 ### Local Development
-To run or develop the script locally:
 
-```bash
-# Clone the repository
-git clone https://github.com/NewAlexandria/gh-repo-activity-costs.git
-cd gh-repo-activity-costs
-
-# Make it executable
-chmod +x gh-repo-activity-costs
-
-# Run locally
-./gh-repo-activity-costs --help
-```
+If you're interested in running this script locally or contributing to its development, please see the [Local Development](CONTRIBUTING.md#your-first-code-contribution) section in our contributing guide.
 
 ## Quick Start
 
 ### 1. Fetch Data
+
 Fetch the last 100 PRs from a repository:
 ```bash
-./gh-repo-activity-costs --repo owner/repo --limit 100
+gh repo-activity-costs --repo owner/repo --limit 100
 ```
 This generates `pr_metrics_report.json`.
 
 ### 2. Analyze Report
+
 Generate a summary from the report:
 ```bash
-./gh-repo-activity-costs --analyze pr_metrics_report.json --stream
+gh repo-activity-costs --analyze pr_metrics_report.json --stream
+```
+
+### 3. Analyze Report
+
+For a quick look at recent PR performance, fetch the last 50 PRs to keep an eye on recent performance.
+```bash
+gh repo-activity-costs --repo owner/repo --limit 50 --stream
 ```
 
 ## Detailed Usage

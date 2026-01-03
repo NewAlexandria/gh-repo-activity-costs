@@ -64,18 +64,28 @@ When analyzing a report using `--analyze`, the script generates:
    - Shows monthly savings breakdowns.
    - Example use case: "If we reduce CI time by 5 minutes per PR, how much $ do we save?"
 
+### Custom Histogram Bins
+
+You can customize the runtime distribution bins using the `--runtime-bins` flag. Pass a comma-separated list of cutoffs.
+Default bins are `2,5,10,20,30,35,40,45,50`.
+
+```bash
+# Example: Create bins for 0-10, 10-30, 30-60, 60+
+./gh-repo-activity-costs --repo owner/repo --runtime-bins "10,30,60" --stream
+```
+
 ## Workflows
 
 ### 1. Daily/Weekly Monitoring
 Fetch the last 50 PRs to keep an eye on recent performance.
 ```bash
-python3 pr_metrics_analyzer.py --repo suvie-eng/suvie-cloud --limit 50 --stream
+gh repo-activity-costs --repo suvie-eng/suvie-cloud --limit 50 --stream
 ```
 
 ### 2. Historical Analysis (Full Year)
 Fetch all PRs for a specific year.
 ```bash
-python3 pr_metrics_analyzer.py \
+gh repo-activity-costs \
   --repo suvie-eng/suvie-cloud \
   --start-date 2025-01-01 \
   --end-date 2025-12-31 \
@@ -86,7 +96,7 @@ python3 pr_metrics_analyzer.py \
 ### 3. Analyze Existing Data
 If you have a report from a previous run (or a safety file), you can generate new stats without re-fetching.
 ```bash
-python3 pr_metrics_analyzer.py \
+gh repo-activity-costs \
   --analyze safety_suvie-cloud.json \
   --summary-output summary_2025.json
 ```
